@@ -69,12 +69,14 @@
       background: #101319;
       color: #f5f7fb;
       font-family: Arial, Helvetica, sans-serif;
+      overscroll-behavior: none;
     }
 
     body {
       display: grid;
       place-items: center;
       overflow: hidden;
+      touch-action: manipulation;
     }
 
     .pong-shell {
@@ -125,6 +127,7 @@
       display: block;
       border: 1px solid #384252;
       background: #171b22;
+      touch-action: none;
     }
 
     .pong-menu {
@@ -289,6 +292,10 @@
   `;
   document.head.appendChild(pageStyle);
 
+  const isTouchDevice =
+    "ontouchstart" in window || (navigator.maxTouchPoints || 0) > 0;
+  let touchTargetY = null;
+
   const shell = document.createElement("main");
   shell.className = "pong-shell";
 
@@ -296,7 +303,9 @@
   topbar.className = "pong-topbar";
 
   const help = document.createElement("div");
-  help.textContent = "Move: W/S or arrow keys";
+  help.textContent = isTouchDevice
+    ? "Drag the board to move, tap to serve"
+    : "Move: W/S or arrow keys";
 
   const score = document.createElement("div");
   score.className = "pong-score";
@@ -334,7 +343,7 @@
   let selectedDifficulty = DIFFICULTIES.Medium;
   let ballSpeedPercent = 100;
   let lastTime = performance.now();
-  let roundMessage = "Press Space to serve";
+  let roundMessage = isTouchDevice ? "Tap the board to serve" : "Press Space to serve";
   let paused = true;
   let gameActive = false;
   let survivalReturns = 0;
@@ -365,7 +374,7 @@
   let onlineStatusMessage = "";
   let joinCodeDraft = "";
   let peerJsPromise = null;
-  const remoteInput = { up: false, down: false };
+  let clientOwnY = HEIGHT / 2 - PADDLE_HEIGHT / 2;
 
   const player = {
     x: 36,
@@ -577,6 +586,8 @@
       input.maxLength = 4;
       input.placeholder = "ABCD";
       input.autocapitalize = "characters";
+      input.autocomplete = "off";
+      input.spellcheck = false;
       input.value = joinCodeDraft;
       input.addEventListener("input", () => {
         joinCodeDraft = input.value.toUpperCase();
@@ -610,6 +621,7 @@
       [
         "Use W/S or the arrow keys to move your paddle.",
         "Press Space to serve the ball.",
+        "On touch devices, drag anywhere on the board to move your paddle and tap to serve.",
         "Bot mode: first player to 5 points wins.",
         "Quitting a bot match before it's over counts as a loss.",
         "Online 1v1: challenge a real opponent over the internet, first to 5 wins.",
@@ -734,6 +746,17 @@
     return gameMode === "online" ? ONLINE_WINNING_SCORE : BOT_WINNING_SCORE;
   }
 
+  function serveHintText(context = "serve") {
+    if (!isTouchDevice) {
+      if (context === "again") return "Press Space to play again";
+      if (context === "retry") return "Press Space to retry";
+      return "Press Space to serve";
+    }
+    if (context === "again") return "Tap the board to play again";
+    if (context === "retry") return "Tap the board to retry";
+    return "Tap the board to serve";
+  }
+
   function isOnlineClient() {
     return gameMode === "online" && onlineRole === "client";
   }
@@ -773,16 +796,19 @@
     survivalGameOver = false;
     speedBonusPercent = 0;
     paddleBonusPercent = 0;
+    touchTargetY = null;
+    clientOwnY = HEIGHT / 2 - PADDLE_HEIGHT / 2;
     updateScoreLabel();
+    const serveHint = serveHintText("serve");
     if (gameMode === "survival") {
       help.textContent = `Survival | Best: ${survivalBest} | Ball: 100% | Paddle: 100%`;
     } else if (gameMode === "online") {
       help.textContent =
         onlineRole === "host"
-          ? "Online 1v1 | You control the LEFT paddle"
-          : "Online 1v1 | You control the RIGHT paddle";
+          ? `Online 1v1 | You control the LEFT paddle | ${serveHint}`
+          : `Online 1v1 | You control the RIGHT paddle | ${serveHint}`;
     } else {
-      help.textContent = `Difficulty: ${selectedDifficulty.name} | Speed: ${ballSpeedPercent}%`;
+      help.textContent = `Difficulty: ${selectedDifficulty.name} | Speed: ${ballSpeedPercent}% | ${serveHint}`;
     }
     ai.speed = selectedDifficulty.aiSpeed;
     resetPaddles();
@@ -790,14 +816,11 @@
     paused = true;
     gameActive = true;
     if (gameMode === "survival") {
-      roundMessage = "Survival: press Space to serve";
+      roundMessage = `Survival: ${serveHint.charAt(0).toLowerCase()}${serveHint.slice(1)}`;
     } else if (gameMode === "online") {
-      roundMessage =
-        onlineRole === "host"
-          ? "Press Space to serve"
-          : "Waiting for host to serve...";
+      roundMessage = onlineRole === "host" ? serveHint : "Waiting for host to serve...";
     } else {
-      roundMessage = "Press Space to serve";
+      roundMessage = serveHint;
     }
     fieldPowerUp = null;
     powerUpSpawnTimer = randomSpawnDelay();
@@ -852,7 +875,9 @@
     gameActive = false;
     paused = true;
     roundMessage = "";
-    help.textContent = "Move: W/S or arrow keys";
+    help.textContent = isTouchDevice
+      ? "Drag the board to move, tap to serve"
+      : "Move: W/S or arrow keys";
     setScreen("main");
   }
 
@@ -941,7 +966,7 @@
       if (gameMode === "bot") {
         recordBotResult("player");
       }
-      roundMessage = "You win! Press Space to play again";
+      roundMessage = `You win! ${serveHintText("again")}`;
       sfx.win();
     } else if (ai.score >= target) {
       if (gameMode === "bot") {
@@ -949,18 +974,18 @@
       }
       roundMessage =
         gameMode === "online"
-          ? "Opponent wins. Press Space to try again"
-          : "AI wins. Press Space to try again";
+          ? `Opponent wins. ${serveHintText("again")}`
+          : `AI wins. ${serveHintText("again")}`;
       sfx.lose();
     } else {
-      roundMessage = "Press Space to serve";
+      roundMessage = serveHintText("serve");
     }
   }
 
   function endSurvivalRun() {
     paused = true;
     survivalGameOver = true;
-    roundMessage = `Game over: ${survivalReturns} returns. Press Space to retry`;
+    roundMessage = `Game over: ${survivalReturns} returns. ${serveHintText("retry")}`;
     triggerImpact(0.3, 10);
     sfx.lose();
   }
@@ -1031,8 +1056,6 @@
     peer = null;
     onlineRole = null;
     onlineRoomCode = "";
-    remoteInput.up = false;
-    remoteInput.down = false;
   }
 
   function hostOnlineMatch() {
@@ -1147,9 +1170,8 @@
       if (data.serve) {
         startRound();
       }
-      if (typeof data.up === "boolean" || typeof data.down === "boolean") {
-        remoteInput.up = !!data.up;
-        remoteInput.down = !!data.down;
+      if (typeof data.y === "number") {
+        ai.y = clamp(data.y, 0, HEIGHT - ai.height);
       }
       return;
     }
@@ -1180,20 +1202,19 @@
     updateScoreLabel();
   }
 
-  function updateRemotePaddle(deltaSeconds) {
-    const movement = (remoteInput.down ? 1 : 0) - (remoteInput.up ? 1 : 0);
-    ai.y += movement * PLAYER_BASE_SPEED * deltaSeconds;
-    ai.y = clamp(ai.y, 0, HEIGHT - ai.height);
-  }
-
-  function sendClientInput() {
-    if (!onlineConn || !onlineConn.open) {
-      return;
+  function updateAndSendClientInput(deltaSeconds) {
+    if (touchTargetY !== null) {
+      clientOwnY = clamp(touchTargetY - PADDLE_HEIGHT / 2, 0, HEIGHT - PADDLE_HEIGHT);
+    } else {
+      const up = keys.has("w") || keys.has("arrowup");
+      const down = keys.has("s") || keys.has("arrowdown");
+      const movement = (down ? 1 : 0) - (up ? 1 : 0);
+      clientOwnY = clamp(clientOwnY + movement * PLAYER_BASE_SPEED * deltaSeconds, 0, HEIGHT - PADDLE_HEIGHT);
     }
-    onlineConn.send({
-      up: keys.has("w") || keys.has("arrowup"),
-      down: keys.has("s") || keys.has("arrowdown"),
-    });
+
+    if (onlineConn && onlineConn.open) {
+      onlineConn.send({ y: clientOwnY });
+    }
   }
 
   function broadcastHostState() {
@@ -1324,6 +1345,12 @@
   }
 
   function updatePlayer(deltaSeconds) {
+    if (touchTargetY !== null) {
+      player.y = clamp(touchTargetY - player.height / 2, 0, HEIGHT - player.height);
+      checkPowerUpPickup();
+      return;
+    }
+
     const up = keys.has("w") || keys.has("arrowup");
     const down = keys.has("s") || keys.has("arrowdown");
     const movement = (down ? 1 : 0) - (up ? 1 : 0);
@@ -1681,11 +1708,8 @@
       if (!client) {
         updatePlayer(deltaSeconds);
       }
-      if (host) {
-        updateRemotePaddle(deltaSeconds);
-      }
       if (client) {
-        sendClientInput();
+        updateAndSendClientInput(deltaSeconds);
       }
 
       if (!paused) {
@@ -1737,6 +1761,37 @@
   window.addEventListener("keyup", (event) => {
     keys.delete(event.key.toLowerCase());
   });
+
+  function relativeCanvasY(clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const ratio = HEIGHT / rect.height;
+    return clamp((clientY - rect.top) * ratio, 0, HEIGHT);
+  }
+
+  function handleTouchStart(event) {
+    const touch = event.touches[0];
+    if (!touch) {
+      return;
+    }
+    event.preventDefault();
+    touchTargetY = relativeCanvasY(touch.clientY);
+
+    if (screen === "game" && gameActive && paused) {
+      startRound();
+    }
+  }
+
+  function handleTouchMove(event) {
+    const touch = event.touches[0];
+    if (!touch) {
+      return;
+    }
+    event.preventDefault();
+    touchTargetY = relativeCanvasY(touch.clientY);
+  }
+
+  canvas.addEventListener("touchstart", handleTouchStart, { passive: false });
+  canvas.addEventListener("touchmove", handleTouchMove, { passive: false });
 
   restartButton.addEventListener("click", returnToMenu);
   soundButton.addEventListener("click", () => {
