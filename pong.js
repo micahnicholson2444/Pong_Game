@@ -6,6 +6,7 @@
   const BALL_SIZE = 14;
   const WINNING_SCORE = 7;
   const SURVIVAL_BASE_SPEED = 430;
+  const PLAYER_BASE_SPEED = 520;
 
   const DIFFICULTIES = {
     Easy: {
@@ -202,6 +203,30 @@
       cursor: pointer;
     }
 
+    .pong-stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin: 2px 0;
+      color: #e5eaf4;
+      text-align: left;
+      font-size: 14px;
+    }
+
+    .pong-stat {
+      border: 1px solid #354052;
+      border-radius: 6px;
+      background: rgba(36, 43, 55, 0.72);
+      padding: 8px 10px;
+    }
+
+    .pong-stat strong {
+      display: block;
+      color: #79d8ff;
+      font-size: 16px;
+      line-height: 1.25;
+    }
+
     @media (max-width: 560px) {
       .pong-topbar {
         align-items: stretch;
@@ -267,17 +292,19 @@
   let survivalBest = Number(localStorage.getItem("pongSurvivalBest") || 0);
   let survivalGameOver = false;
   let speedBonusPercent = 0;
+  let paddleBonusPercent = 0;
   let impactFlash = 0;
   let shakeTime = 0;
   let shakeStrength = 0;
   const ballTrail = [];
+  const botStats = loadBotStats();
 
   const player = {
     x: 36,
     y: HEIGHT / 2 - PADDLE_HEIGHT / 2,
     width: PADDLE_WIDTH,
     height: PADDLE_HEIGHT,
-    speed: 520,
+    speed: PLAYER_BASE_SPEED,
     score: 0,
   };
 
@@ -328,6 +355,7 @@
       panel.append(
         title("PONG"),
         subtitle("Classic Pong against an AI opponent."),
+        statsPanel(),
         makeButton("PLAY", () => setScreen("mode"), "primary"),
         makeButton("INFO", () => setScreen("info")),
         makeButton("CREDITS", () => setScreen("credits"))
@@ -338,6 +366,7 @@
       panel.append(
         title("PLAY"),
         subtitle("Choose your match type."),
+        statsPanel(),
         makeButton("Play Against Bot", () => setScreen("speed"), "primary"),
         makeButton("Survival Mode", startSurvivalGame),
         makeButton("Back", () => setScreen("main"))
@@ -373,7 +402,8 @@
         "Press Space to serve the ball.",
         "Bot mode: first player to 7 points wins.",
         "Survival mode: return the ball for as long as possible against the wall.",
-        "In survival, every successful return makes the ball 1% faster.",
+        "In survival, every successful return makes the ball 5% faster.",
+        "Your paddle speed increases by 2.5% for each survival return.",
         "Hit the ball near the paddle edges to change its angle.",
       ].forEach((text) => {
         const item = document.createElement("li");
@@ -440,11 +470,51 @@
     return wrap;
   }
 
+  function statsPanel() {
+    const stats = document.createElement("div");
+    stats.className = "pong-stats";
+
+    [
+      ["Best Survival", `${survivalBest}`],
+      ["Best Bot Beaten", botStats.bestDifficulty || "None"],
+      ["Bot Wins", `${botStats.botWins}`],
+      ["Bot Losses", `${botStats.botLosses}`],
+    ].forEach(([label, value]) => {
+      const item = document.createElement("div");
+      item.className = "pong-stat";
+      item.innerHTML = `<strong>${value}</strong>${label}`;
+      stats.appendChild(item);
+    });
+
+    return stats;
+  }
+
+  function loadBotStats() {
+    let saved = {};
+
+    try {
+      saved = JSON.parse(localStorage.getItem("pongBotStats") || "{}");
+    } catch {
+      saved = {};
+    }
+
+    return {
+      botWins: Number(saved.botWins || 0),
+      botLosses: Number(saved.botLosses || 0),
+      bestDifficulty: saved.bestDifficulty || "",
+    };
+  }
+
+  function saveBotStats() {
+    localStorage.setItem("pongBotStats", JSON.stringify(botStats));
+  }
+
   function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
   }
 
   function resetPaddles() {
+    player.speed = PLAYER_BASE_SPEED;
     player.y = HEIGHT / 2 - player.height / 2;
     ai.y = HEIGHT / 2 - ai.height / 2;
   }
@@ -472,10 +542,11 @@
     survivalReturns = 0;
     survivalGameOver = false;
     speedBonusPercent = 0;
+    paddleBonusPercent = 0;
     updateScoreLabel();
     help.textContent =
       gameMode === "survival"
-        ? `Survival | Best: ${survivalBest} | Speed: 100%`
+        ? `Survival | Best: ${survivalBest} | Ball: 100% | Paddle: 100%`
         : `Difficulty: ${selectedDifficulty.name} | Speed: ${ballSpeedPercent}%`;
     ai.speed = selectedDifficulty.aiSpeed;
     resetPaddles();
@@ -555,9 +626,11 @@
       survivalReturns += 1;
       survivalBest = Math.max(survivalBest, survivalReturns);
       localStorage.setItem("pongSurvivalBest", String(survivalBest));
-      speedBonusPercent += 1;
+      speedBonusPercent += 5;
+      paddleBonusPercent += 2.5;
+      player.speed = PLAYER_BASE_SPEED * (1 + paddleBonusPercent / 100);
       ball.speed = getStartingBallSpeed();
-      help.textContent = `Survival | Best: ${survivalBest} | Speed: ${100 + speedBonusPercent}%`;
+      help.textContent = `Survival | Best: ${survivalBest} | Ball: ${100 + speedBonusPercent}% | Paddle: ${formatPercent(100 + paddleBonusPercent)}`;
       updateScoreLabel();
     } else {
       ball.speed = Math.min(ball.speed + 24, getStartingBallSpeed() + 330);
@@ -582,8 +655,10 @@
     paused = true;
 
     if (player.score >= WINNING_SCORE) {
+      recordBotResult("player");
       roundMessage = "You win! Press Space to play again";
     } else if (ai.score >= WINNING_SCORE) {
+      recordBotResult("ai");
       roundMessage = "AI wins. Press Space to try again";
     } else {
       roundMessage = "Press Space to serve";
@@ -595,6 +670,31 @@
     survivalGameOver = true;
     roundMessage = `Game over: ${survivalReturns} returns. Press Space to retry`;
     triggerImpact(0.3, 10);
+  }
+
+  function recordBotResult(winner) {
+    if (winner === "player") {
+      botStats.botLosses += 1;
+      updateBestDifficulty();
+    } else {
+      botStats.botWins += 1;
+    }
+
+    saveBotStats();
+  }
+
+  function updateBestDifficulty() {
+    const order = Object.keys(DIFFICULTIES);
+    const currentBestIndex = order.indexOf(botStats.bestDifficulty);
+    const selectedIndex = order.indexOf(selectedDifficulty.name);
+
+    if (selectedIndex > currentBestIndex) {
+      botStats.bestDifficulty = selectedDifficulty.name;
+    }
+  }
+
+  function formatPercent(value) {
+    return `${Number.isInteger(value) ? value : value.toFixed(1)}%`;
   }
 
   function triggerImpact(flash, shake) {
