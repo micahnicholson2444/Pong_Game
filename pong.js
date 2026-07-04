@@ -175,6 +175,32 @@
       line-height: 1.55;
     }
 
+    .pong-slider-wrap {
+      display: grid;
+      gap: 10px;
+      padding: 12px 0 4px;
+      color: #e5eaf4;
+      text-align: left;
+    }
+
+    .pong-slider-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      font-weight: 700;
+    }
+
+    .pong-slider-value {
+      color: #79d8ff;
+    }
+
+    .pong-slider {
+      width: 100%;
+      accent-color: #79d8ff;
+      cursor: pointer;
+    }
+
     @media (max-width: 560px) {
       .pong-topbar {
         align-items: stretch;
@@ -230,6 +256,7 @@
   const keys = new Set();
   let screen = "main";
   let selectedDifficulty = DIFFICULTIES.Medium;
+  let ballSpeedPercent = 100;
   let lastTime = performance.now();
   let roundMessage = "Press Space to serve";
   let paused = true;
@@ -301,8 +328,18 @@
       panel.append(
         title("PLAY"),
         subtitle("Choose your match type."),
-        makeButton("Play Against Bot", () => setScreen("difficulty"), "primary"),
+        makeButton("Play Against Bot", () => setScreen("speed"), "primary"),
         makeButton("Back", () => setScreen("main"))
+      );
+    }
+
+    if (screen === "speed") {
+      panel.append(
+        title("Ball Speed"),
+        subtitle("Set how fast the ball moves before choosing difficulty."),
+        speedSlider(),
+        makeButton("Continue", () => setScreen("difficulty"), "primary"),
+        makeButton("Back", () => setScreen("mode"))
       );
     }
 
@@ -354,6 +391,37 @@
     return element;
   }
 
+  function speedSlider() {
+    const wrap = document.createElement("label");
+    wrap.className = "pong-slider-wrap";
+
+    const top = document.createElement("div");
+    top.className = "pong-slider-top";
+
+    const label = document.createElement("span");
+    label.textContent = "Speed";
+
+    const value = document.createElement("span");
+    value.className = "pong-slider-value";
+    value.textContent = `${ballSpeedPercent}%`;
+
+    const slider = document.createElement("input");
+    slider.className = "pong-slider";
+    slider.type = "range";
+    slider.min = "100";
+    slider.max = "200";
+    slider.step = "5";
+    slider.value = String(ballSpeedPercent);
+    slider.addEventListener("input", () => {
+      ballSpeedPercent = Number(slider.value);
+      value.textContent = `${ballSpeedPercent}%`;
+    });
+
+    top.append(label, value);
+    wrap.append(top, slider);
+    return wrap;
+  }
+
   function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
   }
@@ -366,16 +434,20 @@
   function resetBall(direction = Math.random() > 0.5 ? 1 : -1) {
     ball.x = WIDTH / 2 - ball.size / 2;
     ball.y = HEIGHT / 2 - ball.size / 2;
-    ball.speed = selectedDifficulty.ballSpeed;
+    ball.speed = getStartingBallSpeed();
     ball.vx = direction * ball.speed;
     ball.vy = (Math.random() * 240 - 120) || 100;
+  }
+
+  function getStartingBallSpeed() {
+    return selectedDifficulty.ballSpeed * (ballSpeedPercent / 100);
   }
 
   function restartGame() {
     player.score = 0;
     ai.score = 0;
     score.textContent = "0 : 0";
-    help.textContent = `Difficulty: ${selectedDifficulty.name}`;
+    help.textContent = `Difficulty: ${selectedDifficulty.name} | Speed: ${ballSpeedPercent}%`;
     ai.speed = selectedDifficulty.aiSpeed;
     resetPaddles();
     resetBall();
@@ -426,7 +498,7 @@
     const ballCenter = ball.y + ball.size / 2;
     const hitPosition = (ballCenter - paddleCenter) / (paddle.height / 2);
 
-    ball.speed = Math.min(ball.speed + 24, selectedDifficulty.ballSpeed + 330);
+    ball.speed = Math.min(ball.speed + 24, getStartingBallSpeed() + 330);
     ball.vx = direction * ball.speed;
     ball.vy = hitPosition * 360;
     ball.x = direction > 0 ? paddle.x + paddle.width : paddle.x - ball.size;
