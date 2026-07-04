@@ -293,7 +293,9 @@
   document.head.appendChild(pageStyle);
 
   const isTouchDevice =
-    "ontouchstart" in window || (navigator.maxTouchPoints || 0) > 0;
+    "ontouchstart" in window ||
+    (navigator.maxTouchPoints || 0) > 0 ||
+    (window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
   let touchTargetY = null;
 
   const shell = document.createElement("main");
@@ -1115,7 +1117,7 @@
         peer = new window.Peer(undefined, { debug: 0 });
 
         peer.on("open", () => {
-          const conn = peer.connect(`pong-${code}`, { reliable: true });
+          const conn = peer.connect(`pong-${code}`, { reliable: false });
           onlineConn = conn;
           onlineRole = "client";
 
@@ -1202,7 +1204,11 @@
     updateScoreLabel();
   }
 
-  function updateAndSendClientInput(deltaSeconds) {
+  const NETWORK_SEND_INTERVAL_MS = 1000 / 30; // 30 updates/sec is plenty for paddle sync
+  let lastClientSendAt = 0;
+  let lastHostBroadcastAt = 0;
+
+  function updateAndSendClientInput(deltaSeconds, now) {
     if (touchTargetY !== null) {
       clientOwnY = clamp(touchTargetY - PADDLE_HEIGHT / 2, 0, HEIGHT - PADDLE_HEIGHT);
     } else {
@@ -1212,15 +1218,25 @@
       clientOwnY = clamp(clientOwnY + movement * PLAYER_BASE_SPEED * deltaSeconds, 0, HEIGHT - PADDLE_HEIGHT);
     }
 
+    if (now - lastClientSendAt < NETWORK_SEND_INTERVAL_MS) {
+      return;
+    }
+    lastClientSendAt = now;
+
     if (onlineConn && onlineConn.open) {
       onlineConn.send({ y: clientOwnY });
     }
   }
 
-  function broadcastHostState() {
+  function broadcastHostState(now) {
     if (!onlineConn || !onlineConn.open) {
       return;
     }
+    if (now - lastHostBroadcastAt < NETWORK_SEND_INTERVAL_MS) {
+      return;
+    }
+    lastHostBroadcastAt = now;
+
     onlineConn.send({
       ball: { x: ball.x, y: ball.y },
       hostY: player.y,
@@ -1548,12 +1564,11 @@
   function drawPlayerPaddle() {
     if (effects.immunity > 0) {
       const glowPulse = 0.5 + Math.sin(performance.now() / 110) * 0.25;
-      ctx.save();
-      ctx.shadowColor = POWERUP_TYPES.immunity.color;
-      ctx.shadowBlur = 18 * glowPulse + 6;
+      const pad = 3 + glowPulse * 4;
+      ctx.fillStyle = POWERUP_TYPES.immunity.glow;
+      ctx.fillRect(player.x - pad, player.y - pad, player.width + pad * 2, player.height + pad * 2);
       ctx.fillStyle = "#63d2ff";
       ctx.fillRect(player.x, player.y, player.width, player.height);
-      ctx.restore();
       ctx.strokeStyle = POWERUP_TYPES.immunity.color;
       ctx.lineWidth = 2;
       ctx.strokeRect(player.x - 2, player.y - 2, player.width + 4, player.height + 4);
@@ -1561,16 +1576,27 @@
     }
 
     if (effects.paddle > 0) {
-      ctx.save();
-      ctx.shadowColor = POWERUP_TYPES.paddle.color;
-      ctx.shadowBlur = 12;
+      ctx.fillStyle = POWERUP_TYPES.paddle.glow;
+      ctx.fillRect(player.x - 3, player.y - 3, player.width + 6, player.height + 6);
       ctx.fillStyle = "#63d2ff";
       ctx.fillRect(player.x, player.y, player.width, player.height);
-      ctx.restore();
       return;
     }
 
     drawRect(player, "#63d2ff");
+  }
+
+  const powerupGlowGradients = {};
+
+  function getPowerupGlowGradient(type, baseRadius) {
+    if (!powerupGlowGradients[type]) {
+      const def = POWERUP_TYPES[type];
+      const gradient = ctx.createRadialGradient(0, 0, baseRadius * 0.2, 0, 0, baseRadius * 1.7);
+      gradient.addColorStop(0, def.glow);
+      gradient.addColorStop(1, "rgba(0, 0, 0, 0)");
+      powerupGlowGradients[type] = gradient;
+    }
+    return powerupGlowGradients[type];
   }
 
   function drawPowerUp() {
@@ -1586,13 +1612,13 @@
     ctx.save();
     ctx.translate(fieldPowerUp.x, fieldPowerUp.y);
 
-    const gradient = ctx.createRadialGradient(0, 0, radius * 0.2, 0, 0, radius * 1.7);
-    gradient.addColorStop(0, def.glow);
-    gradient.addColorStop(1, "rgba(0, 0, 0, 0)");
-    ctx.fillStyle = gradient;
+    ctx.save();
+    ctx.scale(pulse, pulse);
+    ctx.fillStyle = getPowerupGlowGradient(fieldPowerUp.type, POWERUP_RADIUS);
     ctx.beginPath();
-    ctx.arc(0, 0, radius * 1.7, 0, Math.PI * 2);
+    ctx.arc(0, 0, POWERUP_RADIUS * 1.7, 0, Math.PI * 2);
     ctx.fill();
+    ctx.restore();
 
     ctx.fillStyle = "rgba(16, 19, 25, 0.88)";
     ctx.beginPath();
@@ -1709,7 +1735,7 @@
         updatePlayer(deltaSeconds);
       }
       if (client) {
-        updateAndSendClientInput(deltaSeconds);
+        updateAndSendClientInput(deltaSeconds, now);
       }
 
       if (!paused) {
@@ -1730,7 +1756,7 @@
       }
 
       if (host) {
-        broadcastHostState();
+        broadcastHostState(now);
       }
     }
 
@@ -1768,30 +1794,76 @@
     return clamp((clientY - rect.top) * ratio, 0, HEIGHT);
   }
 
-  function handleTouchStart(event) {
-    const touch = event.touches[0];
-    if (!touch) {
+  let isDragging = false;
+
+  function handlePointerDown(event) {
+    if (event.pointerType === "mouse" && event.button !== 0) {
       return;
     }
-    event.preventDefault();
-    touchTargetY = relativeCanvasY(touch.clientY);
+    isDragging = true;
+    if (canvas.setPointerCapture) {
+      try {
+        canvas.setPointerCapture(event.pointerId);
+      } catch {
+        // ignore - not fatal if capture isn't supported
+      }
+    }
+    touchTargetY = relativeCanvasY(event.clientY);
 
     if (screen === "game" && gameActive && paused) {
       startRound();
     }
   }
 
-  function handleTouchMove(event) {
-    const touch = event.touches[0];
-    if (!touch) {
+  function handlePointerMove(event) {
+    if (!isDragging) {
       return;
     }
-    event.preventDefault();
-    touchTargetY = relativeCanvasY(touch.clientY);
+    touchTargetY = relativeCanvasY(event.clientY);
   }
 
-  canvas.addEventListener("touchstart", handleTouchStart, { passive: false });
-  canvas.addEventListener("touchmove", handleTouchMove, { passive: false });
+  function handlePointerUp(event) {
+    isDragging = false;
+    if (canvas.releasePointerCapture) {
+      try {
+        canvas.releasePointerCapture(event.pointerId);
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  if (window.PointerEvent) {
+    canvas.addEventListener("pointerdown", handlePointerDown);
+    canvas.addEventListener("pointermove", handlePointerMove);
+    canvas.addEventListener("pointerup", handlePointerUp);
+    canvas.addEventListener("pointercancel", handlePointerUp);
+  } else {
+    // Fallback for older browsers without Pointer Events support.
+    canvas.addEventListener(
+      "touchstart",
+      (event) => {
+        const touch = event.touches[0];
+        if (!touch) return;
+        event.preventDefault();
+        touchTargetY = relativeCanvasY(touch.clientY);
+        if (screen === "game" && gameActive && paused) {
+          startRound();
+        }
+      },
+      { passive: false }
+    );
+    canvas.addEventListener(
+      "touchmove",
+      (event) => {
+        const touch = event.touches[0];
+        if (!touch) return;
+        event.preventDefault();
+        touchTargetY = relativeCanvasY(touch.clientY);
+      },
+      { passive: false }
+    );
+  }
 
   restartButton.addEventListener("click", returnToMenu);
   soundButton.addEventListener("click", () => {
