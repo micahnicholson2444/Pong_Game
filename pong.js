@@ -4,7 +4,8 @@
   const PADDLE_WIDTH = 14;
   const PADDLE_HEIGHT = 96;
   const BALL_SIZE = 14;
-  const WINNING_SCORE = 7;
+  const BOT_WINNING_SCORE = 5;
+  const ONLINE_WINNING_SCORE = 5;
   const SURVIVAL_BASE_SPEED = 430;
   const PLAYER_BASE_SPEED = 520;
 
@@ -228,6 +229,24 @@
       cursor: pointer;
     }
 
+    .pong-code-input {
+      width: 100%;
+      box-sizing: border-box;
+      font: 700 24px Arial, Helvetica, sans-serif;
+      letter-spacing: 8px;
+      text-align: center;
+      text-transform: uppercase;
+      color: #ffffff;
+      background: #1b2029;
+      border: 1px solid #556276;
+      border-radius: 6px;
+      padding: 10px;
+    }
+
+    .pong-code-input:focus-visible {
+      outline: 2px solid #79d8ff;
+    }
+
     .pong-stats {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -338,6 +357,15 @@
   };
   let soundEnabled = true;
   let audioCtx = null;
+
+  let peer = null;
+  let onlineConn = null;
+  let onlineRole = null; // "host" | "client"
+  let onlineRoomCode = "";
+  let onlineStatusMessage = "";
+  let joinCodeDraft = "";
+  let peerJsPromise = null;
+  const remoteInput = { up: false, down: false };
 
   const player = {
     x: 36,
@@ -466,7 +494,7 @@
     if (screen === "main") {
       panel.append(
         title("PONG"),
-        subtitle("Classic Pong against an AI opponent."),
+        subtitle("Classic Pong against an AI opponent or a real player online."),
         statsPanel(),
         makeButton("PLAY", () => setScreen("mode"), "primary"),
         makeButton("INFO", () => setScreen("info")),
@@ -480,6 +508,7 @@
         subtitle("Choose your match type."),
         statsPanel(),
         makeButton("Play Against Bot", () => setScreen("speed"), "primary"),
+        makeButton("Play Online (1v1)", () => setScreen("online")),
         makeButton("Survival Mode", startSurvivalGame),
         makeButton("Back", () => setScreen("main"))
       );
@@ -506,13 +535,84 @@
       );
     }
 
+    if (screen === "online") {
+      panel.append(
+        title("PLAY ONLINE"),
+        subtitle("Challenge another player over the internet. First to 5 wins."),
+        makeButton("Create Match", () => {
+          setScreen("online-host");
+          hostOnlineMatch();
+        }, "primary"),
+        makeButton("Join Match", () => {
+          onlineStatusMessage = "";
+          setScreen("online-join");
+        }),
+        makeButton("Back", () => setScreen("mode"))
+      );
+    }
+
+    if (screen === "online-host") {
+      panel.append(
+        title("HOSTING"),
+        subtitle(onlineStatusMessage || "Setting up match..."),
+        subtitle("Waiting for an opponent to join with this code."),
+        makeButton("Cancel", () => {
+          closeOnlineConnection();
+          onlineStatusMessage = "";
+          setScreen("online");
+        })
+      );
+    }
+
+    if (screen === "online-join") {
+      const wrap = document.createElement("label");
+      wrap.className = "pong-slider-wrap";
+
+      const label = document.createElement("span");
+      label.textContent = "Enter match code";
+
+      const input = document.createElement("input");
+      input.className = "pong-code-input";
+      input.type = "text";
+      input.maxLength = 4;
+      input.placeholder = "ABCD";
+      input.autocapitalize = "characters";
+      input.value = joinCodeDraft;
+      input.addEventListener("input", () => {
+        joinCodeDraft = input.value.toUpperCase();
+        input.value = joinCodeDraft;
+      });
+      input.addEventListener("keydown", (event) => {
+        event.stopPropagation();
+        if (event.key === "Enter") {
+          joinOnlineMatch(joinCodeDraft);
+        }
+      });
+
+      wrap.append(label, input);
+
+      panel.append(
+        title("JOIN MATCH"),
+        wrap,
+        subtitle(onlineStatusMessage || "Ask your opponent for their match code."),
+        makeButton("Connect", () => joinOnlineMatch(joinCodeDraft), "primary"),
+        makeButton("Back", () => {
+          closeOnlineConnection();
+          onlineStatusMessage = "";
+          setScreen("online");
+        })
+      );
+    }
+
     if (screen === "info") {
       const instructions = document.createElement("ul");
       instructions.className = "pong-info";
       [
         "Use W/S or the arrow keys to move your paddle.",
         "Press Space to serve the ball.",
-        "Bot mode: first player to 7 points wins.",
+        "Bot mode: first player to 5 points wins.",
+        "Quitting a bot match before it's over counts as a loss.",
+        "Online 1v1: challenge a real opponent over the internet, first to 5 wins.",
         "Survival mode: return the ball for as long as possible against the wall.",
         "In survival, every successful return makes the ball 5% faster.",
         "Your paddle speed increases by 2.5% for each survival return.",
@@ -630,6 +730,18 @@
     return Math.max(min, Math.min(max, value));
   }
 
+  function currentWinningScore() {
+    return gameMode === "online" ? ONLINE_WINNING_SCORE : BOT_WINNING_SCORE;
+  }
+
+  function isOnlineClient() {
+    return gameMode === "online" && onlineRole === "client";
+  }
+
+  function isOnlineHost() {
+    return gameMode === "online" && onlineRole === "host";
+  }
+
   function resetPaddles() {
     player.speed = PLAYER_BASE_SPEED;
     player.height = PADDLE_HEIGHT;
@@ -662,19 +774,31 @@
     speedBonusPercent = 0;
     paddleBonusPercent = 0;
     updateScoreLabel();
-    help.textContent =
-      gameMode === "survival"
-        ? `Survival | Best: ${survivalBest} | Ball: 100% | Paddle: 100%`
-        : `Difficulty: ${selectedDifficulty.name} | Speed: ${ballSpeedPercent}%`;
+    if (gameMode === "survival") {
+      help.textContent = `Survival | Best: ${survivalBest} | Ball: 100% | Paddle: 100%`;
+    } else if (gameMode === "online") {
+      help.textContent =
+        onlineRole === "host"
+          ? "Online 1v1 | You control the LEFT paddle"
+          : "Online 1v1 | You control the RIGHT paddle";
+    } else {
+      help.textContent = `Difficulty: ${selectedDifficulty.name} | Speed: ${ballSpeedPercent}%`;
+    }
     ai.speed = selectedDifficulty.aiSpeed;
     resetPaddles();
     resetBall(gameMode === "survival" ? -1 : undefined);
     paused = true;
     gameActive = true;
-    roundMessage =
-      gameMode === "survival"
-        ? "Survival: press Space to serve"
-        : "Press Space to serve";
+    if (gameMode === "survival") {
+      roundMessage = "Survival: press Space to serve";
+    } else if (gameMode === "online") {
+      roundMessage =
+        onlineRole === "host"
+          ? "Press Space to serve"
+          : "Waiting for host to serve...";
+    } else {
+      roundMessage = "Press Space to serve";
+    }
     fieldPowerUp = null;
     powerUpSpawnTimer = randomSpawnDelay();
     effects.paddle = 0;
@@ -695,6 +819,12 @@
     restartGame();
   }
 
+  function startOnlineGame() {
+    gameMode = "online";
+    setScreen("game");
+    restartGame();
+  }
+
   function updateScoreLabel() {
     if (gameMode === "survival") {
       score.textContent = `Returns: ${survivalReturns}`;
@@ -705,6 +835,20 @@
   }
 
   function returnToMenu() {
+    if (
+      gameMode === "bot" &&
+      gameActive &&
+      player.score < currentWinningScore() &&
+      ai.score < currentWinningScore()
+    ) {
+      // Leaving an unfinished bot match counts as a loss.
+      recordBotResult("ai");
+    }
+
+    if (gameMode === "online") {
+      closeOnlineConnection();
+    }
+
     gameActive = false;
     paused = true;
     roundMessage = "";
@@ -722,7 +866,15 @@
       return;
     }
 
-    if (player.score >= WINNING_SCORE || ai.score >= WINNING_SCORE) {
+    if (isOnlineClient()) {
+      // The client never runs physics; ask the host to serve instead.
+      if (onlineConn && onlineConn.open) {
+        onlineConn.send({ serve: true });
+      }
+      return;
+    }
+
+    if (player.score >= currentWinningScore() || ai.score >= currentWinningScore()) {
       restartGame();
       return;
     }
@@ -784,13 +936,21 @@
     paused = true;
     sfx.score();
 
-    if (player.score >= WINNING_SCORE) {
-      recordBotResult("player");
+    const target = currentWinningScore();
+    if (player.score >= target) {
+      if (gameMode === "bot") {
+        recordBotResult("player");
+      }
       roundMessage = "You win! Press Space to play again";
       sfx.win();
-    } else if (ai.score >= WINNING_SCORE) {
-      recordBotResult("ai");
-      roundMessage = "AI wins. Press Space to try again";
+    } else if (ai.score >= target) {
+      if (gameMode === "bot") {
+        recordBotResult("ai");
+      }
+      roundMessage =
+        gameMode === "online"
+          ? "Opponent wins. Press Space to try again"
+          : "AI wins. Press Space to try again";
       sfx.lose();
     } else {
       roundMessage = "Press Space to serve";
@@ -824,6 +984,231 @@
     if (selectedIndex > currentBestIndex) {
       botStats.bestDifficulty = selectedDifficulty.name;
     }
+  }
+
+  function loadPeerJs() {
+    if (window.Peer) {
+      return Promise.resolve();
+    }
+    if (peerJsPromise) {
+      return peerJsPromise;
+    }
+    peerJsPromise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js";
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error("Failed to load networking library"));
+      document.head.appendChild(script);
+    });
+    return peerJsPromise;
+  }
+
+  function generateRoomCode() {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let code = "";
+    for (let i = 0; i < 4; i += 1) {
+      code += chars[Math.floor(Math.random() * chars.length)];
+    }
+    return code;
+  }
+
+  function closeOnlineConnection() {
+    if (onlineConn) {
+      try {
+        onlineConn.close();
+      } catch {
+        // ignore
+      }
+    }
+    if (peer) {
+      try {
+        peer.destroy();
+      } catch {
+        // ignore
+      }
+    }
+    onlineConn = null;
+    peer = null;
+    onlineRole = null;
+    onlineRoomCode = "";
+    remoteInput.up = false;
+    remoteInput.down = false;
+  }
+
+  function hostOnlineMatch() {
+    onlineStatusMessage = "Setting up match...";
+    renderMenu();
+
+    loadPeerJs()
+      .then(() => {
+        const code = generateRoomCode();
+        peer = new window.Peer(`pong-${code}`, { debug: 0 });
+
+        peer.on("open", () => {
+          onlineRoomCode = code;
+          onlineStatusMessage = `Share this code: ${code}`;
+          if (screen === "online-host") {
+            renderMenu();
+          }
+        });
+
+        peer.on("connection", (conn) => {
+          onlineConn = conn;
+          onlineRole = "host";
+          conn.on("data", handleOnlineData);
+          conn.on("close", handleOnlineDisconnect);
+          setupOnlineConnection();
+        });
+
+        peer.on("error", (err) => {
+          onlineStatusMessage =
+            err && err.type === "unavailable-id"
+              ? "That code is taken, try again."
+              : "Connection error. Try again.";
+          if (screen === "online-host" || screen === "online") {
+            renderMenu();
+          }
+        });
+      })
+      .catch(() => {
+        onlineStatusMessage = "Could not load networking library. Check your connection.";
+        renderMenu();
+      });
+  }
+
+  function joinOnlineMatch(rawCode) {
+    const code = (rawCode || "").trim().toUpperCase();
+    if (code.length < 4) {
+      onlineStatusMessage = "Enter the 4-character code from your opponent.";
+      renderMenu();
+      return;
+    }
+
+    onlineStatusMessage = "Connecting...";
+    renderMenu();
+
+    loadPeerJs()
+      .then(() => {
+        peer = new window.Peer(undefined, { debug: 0 });
+
+        peer.on("open", () => {
+          const conn = peer.connect(`pong-${code}`, { reliable: true });
+          onlineConn = conn;
+          onlineRole = "client";
+
+          conn.on("open", () => setupOnlineConnection());
+          conn.on("data", handleOnlineData);
+          conn.on("close", handleOnlineDisconnect);
+          conn.on("error", () => {
+            onlineStatusMessage = "Could not reach that match. Check the code and try again.";
+            if (screen === "online-join") {
+              renderMenu();
+            }
+          });
+        });
+
+        peer.on("error", () => {
+          onlineStatusMessage = "Could not reach that match. Check the code and try again.";
+          if (screen === "online-join") {
+            renderMenu();
+          }
+        });
+      })
+      .catch(() => {
+        onlineStatusMessage = "Could not load networking library. Check your connection.";
+        renderMenu();
+      });
+  }
+
+  function setupOnlineConnection() {
+    onlineStatusMessage = "";
+    startOnlineGame();
+  }
+
+  function handleOnlineDisconnect() {
+    if (gameMode === "online" && screen === "game") {
+      gameActive = false;
+      paused = true;
+      roundMessage = "Opponent disconnected";
+      setTimeout(() => {
+        if (gameMode === "online") {
+          returnToMenu();
+        }
+      }, 2500);
+    }
+  }
+
+  function handleOnlineData(data) {
+    if (!data) {
+      return;
+    }
+
+    if (onlineRole === "host") {
+      if (data.serve) {
+        startRound();
+      }
+      if (typeof data.up === "boolean" || typeof data.down === "boolean") {
+        remoteInput.up = !!data.up;
+        remoteInput.down = !!data.down;
+      }
+      return;
+    }
+
+    // Client: apply the authoritative state broadcast by the host.
+    if (data.ball) {
+      ball.x = data.ball.x;
+      ball.y = data.ball.y;
+    }
+    if (typeof data.hostY === "number") {
+      player.y = data.hostY;
+    }
+    if (typeof data.clientY === "number") {
+      ai.y = data.clientY;
+    }
+    if (typeof data.hostScore === "number") {
+      player.score = data.hostScore;
+    }
+    if (typeof data.clientScore === "number") {
+      ai.score = data.clientScore;
+    }
+    if (typeof data.message === "string") {
+      roundMessage = data.message;
+    }
+    if (typeof data.paused === "boolean") {
+      paused = data.paused;
+    }
+    updateScoreLabel();
+  }
+
+  function updateRemotePaddle(deltaSeconds) {
+    const movement = (remoteInput.down ? 1 : 0) - (remoteInput.up ? 1 : 0);
+    ai.y += movement * PLAYER_BASE_SPEED * deltaSeconds;
+    ai.y = clamp(ai.y, 0, HEIGHT - ai.height);
+  }
+
+  function sendClientInput() {
+    if (!onlineConn || !onlineConn.open) {
+      return;
+    }
+    onlineConn.send({
+      up: keys.has("w") || keys.has("arrowup"),
+      down: keys.has("s") || keys.has("arrowdown"),
+    });
+  }
+
+  function broadcastHostState() {
+    if (!onlineConn || !onlineConn.open) {
+      return;
+    }
+    onlineConn.send({
+      ball: { x: ball.x, y: ball.y },
+      hostY: player.y,
+      clientY: ai.y,
+      hostScore: player.score,
+      clientScore: ai.score,
+      message: roundMessage,
+      paused,
+    });
   }
 
   function formatPercent(value) {
@@ -981,7 +1366,7 @@
       bounceOffPaddle(player, 1);
     }
 
-    if (gameMode === "bot" && rectangleCollision(ball, ai) && ball.vx > 0) {
+    if ((gameMode === "bot" || gameMode === "online") && rectangleCollision(ball, ai) && ball.vx > 0) {
       bounceOffPaddle(ai, -1);
     }
 
@@ -1004,7 +1389,7 @@
       } else {
         pointScored("ai");
       }
-    } else if (gameMode === "bot" && ball.x > WIDTH) {
+    } else if ((gameMode === "bot" || gameMode === "online") && ball.x > WIDTH) {
       pointScored("player");
     }
   }
@@ -1271,6 +1656,8 @@
     drawPlayerPaddle();
     if (gameMode === "bot") {
       drawRect(ai, "#ffcc66");
+    } else if (gameMode === "online") {
+      drawRect(ai, "#ff8fd6");
     }
     drawBall();
     drawEffectHud();
@@ -1288,7 +1675,18 @@
     }
 
     if (gameActive) {
-      updatePlayer(deltaSeconds);
+      const client = isOnlineClient();
+      const host = isOnlineHost();
+
+      if (!client) {
+        updatePlayer(deltaSeconds);
+      }
+      if (host) {
+        updateRemotePaddle(deltaSeconds);
+      }
+      if (client) {
+        sendClientInput();
+      }
 
       if (!paused) {
         ballTrail.push({ x: ball.x, y: ball.y });
@@ -1299,9 +1697,16 @@
         if (gameMode === "bot") {
           updateAi(deltaSeconds);
         }
-        updateBall(deltaSeconds);
-        updatePowerUpSpawning(deltaSeconds);
-        updateActiveEffects(deltaSeconds);
+
+        if (!client) {
+          updateBall(deltaSeconds);
+          updatePowerUpSpawning(deltaSeconds);
+          updateActiveEffects(deltaSeconds);
+        }
+      }
+
+      if (host) {
+        broadcastHostState();
       }
     }
 
