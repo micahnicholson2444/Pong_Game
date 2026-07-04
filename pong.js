@@ -6,12 +6,39 @@
   const BALL_SIZE = 14;
   const WINNING_SCORE = 7;
 
+  const DIFFICULTIES = {
+    Easy: {
+      aiSpeed: 300,
+      ballSpeed: 370,
+      reactionWobble: 60,
+      name: "Easy",
+    },
+    Medium: {
+      aiSpeed: 410,
+      ballSpeed: 430,
+      reactionWobble: 28,
+      name: "Medium",
+    },
+    Hard: {
+      aiSpeed: 535,
+      ballSpeed: 490,
+      reactionWobble: 12,
+      name: "Hard",
+    },
+    Extreme: {
+      aiSpeed: 690,
+      ballSpeed: 560,
+      reactionWobble: 2,
+      name: "Extreme",
+    },
+  };
+
   const pageStyle = document.createElement("style");
   pageStyle.textContent = `
     html, body {
       margin: 0;
       min-height: 100%;
-      background: #121418;
+      background: #101319;
       color: #f5f7fb;
       font-family: Arial, Helvetica, sans-serif;
     }
@@ -54,8 +81,14 @@
       font: inherit;
     }
 
-    .pong-button:hover {
+    .pong-button:hover,
+    .pong-button:focus-visible {
       background: #2a3240;
+      outline: none;
+    }
+
+    .pong-board {
+      position: relative;
     }
 
     canvas {
@@ -64,6 +97,98 @@
       display: block;
       border: 1px solid #384252;
       background: #171b22;
+    }
+
+    .pong-menu {
+      position: absolute;
+      inset: 1px;
+      display: grid;
+      place-items: center;
+      padding: 22px;
+      background: rgba(16, 19, 25, 0.9);
+    }
+
+    .pong-menu[hidden] {
+      display: none;
+    }
+
+    .pong-panel {
+      width: min(92%, 390px);
+      display: grid;
+      gap: 14px;
+      text-align: center;
+    }
+
+    .pong-title {
+      margin: 0 0 6px;
+      color: #ffffff;
+      font-size: 44px;
+      line-height: 1;
+      letter-spacing: 0;
+    }
+
+    .pong-subtitle {
+      margin: 0 0 4px;
+      color: #bac3d4;
+      font-size: 16px;
+      line-height: 1.45;
+    }
+
+    .pong-menu-button {
+      min-height: 46px;
+      border: 1px solid #556276;
+      background: #242b37;
+      color: #ffffff;
+      border-radius: 6px;
+      padding: 10px 14px;
+      cursor: pointer;
+      font: 700 16px Arial, Helvetica, sans-serif;
+    }
+
+    .pong-menu-button:hover,
+    .pong-menu-button:focus-visible {
+      background: #313a49;
+      outline: none;
+    }
+
+    .pong-menu-button.primary {
+      border-color: #79d8ff;
+      background: #185671;
+    }
+
+    .pong-menu-button.primary:hover,
+    .pong-menu-button.primary:focus-visible {
+      background: #1f6d8f;
+    }
+
+    .pong-info {
+      margin: 0;
+      padding-left: 20px;
+      color: #e5eaf4;
+      text-align: left;
+      line-height: 1.55;
+    }
+
+    .pong-contact {
+      margin: 0;
+      color: #e5eaf4;
+      line-height: 1.55;
+    }
+
+    @media (max-width: 560px) {
+      .pong-topbar {
+        align-items: stretch;
+        flex-direction: column;
+        text-align: center;
+      }
+
+      .pong-title {
+        font-size: 34px;
+      }
+
+      .pong-menu {
+        padding: 16px;
+      }
     }
   `;
   document.head.appendChild(pageStyle);
@@ -84,18 +209,31 @@
   const restartButton = document.createElement("button");
   restartButton.className = "pong-button";
   restartButton.type = "button";
-  restartButton.textContent = "Restart";
+  restartButton.textContent = "Menu";
+
+  const board = document.createElement("section");
+  board.className = "pong-board";
 
   const canvas = document.createElement("canvas");
   canvas.width = WIDTH;
   canvas.height = HEIGHT;
 
+  const menu = document.createElement("div");
+  menu.className = "pong-menu";
+
+  board.append(canvas, menu);
   topbar.append(help, score, restartButton);
-  shell.append(topbar, canvas);
+  shell.append(topbar, board);
   document.body.appendChild(shell);
 
   const ctx = canvas.getContext("2d");
   const keys = new Set();
+  let screen = "main";
+  let selectedDifficulty = DIFFICULTIES.Medium;
+  let lastTime = performance.now();
+  let roundMessage = "Press Space to serve";
+  let paused = true;
+  let gameActive = false;
 
   const player = {
     x: 36,
@@ -111,7 +249,7 @@
     y: HEIGHT / 2 - PADDLE_HEIGHT / 2,
     width: PADDLE_WIDTH,
     height: PADDLE_HEIGHT,
-    speed: 410,
+    speed: selectedDifficulty.aiSpeed,
     score: 0,
   };
 
@@ -119,14 +257,102 @@
     x: WIDTH / 2 - BALL_SIZE / 2,
     y: HEIGHT / 2 - BALL_SIZE / 2,
     size: BALL_SIZE,
-    speed: 430,
+    speed: selectedDifficulty.ballSpeed,
     vx: 0,
     vy: 0,
   };
 
-  let lastTime = performance.now();
-  let roundMessage = "Press Space to serve";
-  let paused = true;
+  function makeButton(label, onClick, className = "") {
+    const button = document.createElement("button");
+    button.className = `pong-menu-button ${className}`.trim();
+    button.type = "button";
+    button.textContent = label;
+    button.addEventListener("click", onClick);
+    return button;
+  }
+
+  function setScreen(nextScreen) {
+    screen = nextScreen;
+    renderMenu();
+  }
+
+  function renderMenu() {
+    menu.replaceChildren();
+    menu.hidden = screen === "game";
+
+    if (screen === "game") {
+      return;
+    }
+
+    const panel = document.createElement("div");
+    panel.className = "pong-panel";
+
+    if (screen === "main") {
+      panel.append(
+        title("PONG"),
+        subtitle("Classic Pong against an AI opponent."),
+        makeButton("PLAY", () => setScreen("mode"), "primary"),
+        makeButton("INFO", () => setScreen("info")),
+        makeButton("CREDITS", () => setScreen("credits"))
+      );
+    }
+
+    if (screen === "mode") {
+      panel.append(
+        title("PLAY"),
+        subtitle("Choose your match type."),
+        makeButton("Play Against Bot", () => setScreen("difficulty"), "primary"),
+        makeButton("Back", () => setScreen("main"))
+      );
+    }
+
+    if (screen === "difficulty") {
+      panel.append(
+        title("Difficulty"),
+        subtitle("Higher difficulty makes the bot faster and more accurate."),
+        ...Object.keys(DIFFICULTIES).map((name) =>
+          makeButton(name, () => startGame(DIFFICULTIES[name]), name === "Medium" ? "primary" : "")
+        ),
+        makeButton("Back", () => setScreen("mode"))
+      );
+    }
+
+    if (screen === "info") {
+      const instructions = document.createElement("ul");
+      instructions.className = "pong-info";
+      ["Use W/S or the arrow keys to move your paddle.", "Press Space to serve the ball.", "First player to 7 points wins.", "Hit the ball near the paddle edges to change its angle."].forEach((text) => {
+        const item = document.createElement("li");
+        item.textContent = text;
+        instructions.appendChild(item);
+      });
+
+      panel.append(title("INFO"), instructions, makeButton("Back", () => setScreen("main"), "primary"));
+    }
+
+    if (screen === "credits") {
+      const contact = document.createElement("p");
+      contact.className = "pong-contact";
+      contact.innerHTML = "Created by<br><strong>Micah Nicholson</strong><br>micahnicholson2444@gmail.com";
+
+      panel.append(title("CREDITS"), contact, makeButton("Back", () => setScreen("main"), "primary"));
+    }
+
+    menu.appendChild(panel);
+  }
+
+  function title(text) {
+    const element = document.createElement("h1");
+    element.className = "pong-title";
+    element.textContent = text;
+    return element;
+  }
+
+  function subtitle(text) {
+    const element = document.createElement("p");
+    element.className = "pong-subtitle";
+    element.textContent = text;
+    return element;
+  }
 
   function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
@@ -140,7 +366,7 @@
   function resetBall(direction = Math.random() > 0.5 ? 1 : -1) {
     ball.x = WIDTH / 2 - ball.size / 2;
     ball.y = HEIGHT / 2 - ball.size / 2;
-    ball.speed = 430;
+    ball.speed = selectedDifficulty.ballSpeed;
     ball.vx = direction * ball.speed;
     ball.vy = (Math.random() * 240 - 120) || 100;
   }
@@ -149,13 +375,34 @@
     player.score = 0;
     ai.score = 0;
     score.textContent = "0 : 0";
+    help.textContent = `Difficulty: ${selectedDifficulty.name}`;
+    ai.speed = selectedDifficulty.aiSpeed;
     resetPaddles();
     resetBall();
     paused = true;
+    gameActive = true;
     roundMessage = "Press Space to serve";
   }
 
+  function startGame(difficulty) {
+    selectedDifficulty = difficulty;
+    setScreen("game");
+    restartGame();
+  }
+
+  function returnToMenu() {
+    gameActive = false;
+    paused = true;
+    roundMessage = "";
+    help.textContent = "Move: W/S or arrow keys";
+    setScreen("main");
+  }
+
   function startRound() {
+    if (!gameActive || screen !== "game") {
+      return;
+    }
+
     if (player.score >= WINNING_SCORE || ai.score >= WINNING_SCORE) {
       restartGame();
       return;
@@ -179,7 +426,7 @@
     const ballCenter = ball.y + ball.size / 2;
     const hitPosition = (ballCenter - paddleCenter) / (paddle.height / 2);
 
-    ball.speed = Math.min(ball.speed + 24, 760);
+    ball.speed = Math.min(ball.speed + 24, selectedDifficulty.ballSpeed + 330);
     ball.vx = direction * ball.speed;
     ball.vy = hitPosition * 360;
     ball.x = direction > 0 ? paddle.x + paddle.width : paddle.x - ball.size;
@@ -218,7 +465,8 @@
   function updateAi(deltaSeconds) {
     const aiCenter = ai.y + ai.height / 2;
     const ballCenter = ball.y + ball.size / 2;
-    const reactionOffset = ball.vx > 0 ? Math.sin(performance.now() / 180) * 18 : 0;
+    const wobble = selectedDifficulty.reactionWobble;
+    const reactionOffset = ball.vx > 0 ? Math.sin(performance.now() / 180) * wobble : 0;
     const target = ballCenter + reactionOffset;
     const distance = target - aiCenter;
     const maxStep = ai.speed * deltaSeconds;
@@ -307,11 +555,13 @@
     const deltaSeconds = Math.min((now - lastTime) / 1000, 0.033);
     lastTime = now;
 
-    updatePlayer(deltaSeconds);
+    if (gameActive) {
+      updatePlayer(deltaSeconds);
 
-    if (!paused) {
-      updateAi(deltaSeconds);
-      updateBall(deltaSeconds);
+      if (!paused) {
+        updateAi(deltaSeconds);
+        updateBall(deltaSeconds);
+      }
     }
 
     draw();
@@ -330,6 +580,11 @@
       return;
     }
 
+    if (key === "escape" && screen === "game") {
+      returnToMenu();
+      return;
+    }
+
     keys.add(key);
   });
 
@@ -337,9 +592,10 @@
     keys.delete(event.key.toLowerCase());
   });
 
-  restartButton.addEventListener("click", restartGame);
+  restartButton.addEventListener("click", returnToMenu);
 
   resetBall();
+  renderMenu();
   draw();
   requestAnimationFrame(gameLoop);
 })();
