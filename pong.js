@@ -8,6 +8,31 @@
   const SURVIVAL_BASE_SPEED = 430;
   const PLAYER_BASE_SPEED = 520;
 
+  const POWERUP_RADIUS = 22;
+  const POWERUP_MIN_SPAWN = 15;
+  const POWERUP_MAX_SPAWN = 30;
+  const POWERUP_LIFETIME = 9;
+  const EFFECT_DURATION = 10;
+
+  const POWERUP_TYPES = {
+    paddle: {
+      color: "#63d2ff",
+      glow: "rgba(99, 210, 255, 0.55)",
+      label: "Paddle +50%",
+    },
+    slow: {
+      color: "#8fe388",
+      glow: "rgba(143, 227, 136, 0.55)",
+      label: "Slow Ball",
+    },
+    immunity: {
+      color: "#ffd166",
+      glow: "rgba(255, 209, 102, 0.55)",
+      label: "Immunity",
+    },
+  };
+  const POWERUP_KEYS = Object.keys(POWERUP_TYPES);
+
   const DIFFICULTIES = {
     Easy: {
       aiSpeed: 300,
@@ -263,6 +288,11 @@
   restartButton.type = "button";
   restartButton.textContent = "Menu";
 
+  const soundButton = document.createElement("button");
+  soundButton.className = "pong-button";
+  soundButton.type = "button";
+  soundButton.textContent = "\uD83D\uDD0A Sound: On";
+
   const board = document.createElement("section");
   board.className = "pong-board";
 
@@ -274,7 +304,7 @@
   menu.className = "pong-menu";
 
   board.append(canvas, menu);
-  topbar.append(help, score, restartButton);
+  topbar.append(help, score, soundButton, restartButton);
   shell.append(topbar, board);
   document.body.appendChild(shell);
 
@@ -298,6 +328,16 @@
   let shakeStrength = 0;
   const ballTrail = [];
   const botStats = loadBotStats();
+
+  let fieldPowerUp = null;
+  let powerUpSpawnTimer = randomSpawnDelay();
+  const effects = {
+    paddle: 0,
+    slow: 0,
+    immunity: 0,
+  };
+  let soundEnabled = true;
+  let audioCtx = null;
 
   const player = {
     x: 36,
@@ -334,6 +374,78 @@
     button.addEventListener("click", onClick);
     return button;
   }
+
+  function ensureAudio() {
+    if (!soundEnabled) {
+      return null;
+    }
+
+    if (!audioCtx) {
+      const AudioCtor = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtor) {
+        return null;
+      }
+      audioCtx = new AudioCtor();
+    }
+
+    if (audioCtx.state === "suspended") {
+      audioCtx.resume();
+    }
+
+    return audioCtx;
+  }
+
+  function playTone({ freq, duration = 0.12, type = "square", volume = 0.18, delay = 0, slideTo = null }) {
+    const ctxAudio = ensureAudio();
+    if (!ctxAudio) {
+      return;
+    }
+
+    const startTime = ctxAudio.currentTime + delay;
+    const osc = ctxAudio.createOscillator();
+    const gain = ctxAudio.createGain();
+
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, startTime);
+    if (slideTo) {
+      osc.frequency.exponentialRampToValueAtTime(Math.max(slideTo, 1), startTime + duration);
+    }
+
+    gain.gain.setValueAtTime(0.0001, startTime);
+    gain.gain.exponentialRampToValueAtTime(volume, startTime + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+
+    osc.connect(gain);
+    gain.connect(ctxAudio.destination);
+    osc.start(startTime);
+    osc.stop(startTime + duration + 0.02);
+  }
+
+  const sfx = {
+    paddleHit: () => playTone({ freq: 220, duration: 0.09, type: "square", volume: 0.16 }),
+    wallBounce: () => playTone({ freq: 340, duration: 0.06, type: "square", volume: 0.12 }),
+    score: () => {
+      playTone({ freq: 200, duration: 0.18, type: "sawtooth", volume: 0.16 });
+      playTone({ freq: 150, duration: 0.22, type: "sawtooth", volume: 0.14, delay: 0.09 });
+    },
+    win: () => {
+      [523, 659, 784, 1046].forEach((freq, index) => {
+        playTone({ freq, duration: 0.18, type: "triangle", volume: 0.18, delay: index * 0.11 });
+      });
+    },
+    lose: () => {
+      [392, 330, 262, 196].forEach((freq, index) => {
+        playTone({ freq, duration: 0.2, type: "sawtooth", volume: 0.16, delay: index * 0.1 });
+      });
+    },
+    powerUpSpawn: () => playTone({ freq: 500, duration: 0.15, type: "sine", volume: 0.1, slideTo: 700 }),
+    powerUpCollect: (type) => {
+      const base = type === "immunity" ? 440 : type === "slow" ? 330 : 392;
+      playTone({ freq: base, duration: 0.1, type: "triangle", volume: 0.2 });
+      playTone({ freq: base * 1.5, duration: 0.14, type: "triangle", volume: 0.18, delay: 0.07 });
+    },
+    powerUpExpire: () => playTone({ freq: 260, duration: 0.14, type: "sine", volume: 0.09, slideTo: 140 }),
+  };
 
   function setScreen(nextScreen) {
     screen = nextScreen;
@@ -405,6 +517,11 @@
         "In survival, every successful return makes the ball 5% faster.",
         "Your paddle speed increases by 2.5% for each survival return.",
         "Hit the ball near the paddle edges to change its angle.",
+        "Power-ups spawn on the field every 15-30 seconds - glide your paddle into one to grab it.",
+        "\u2195\uFE0F Paddle+: your paddle grows 50% taller for 10 seconds.",
+        "\uD83D\uDC0C Slow Ball: instantly saps the ball's speed by 25% for 10 seconds.",
+        "\uD83D\uDEE1\uFE0F Immunity: you can't lose a point or the survival run for 10 seconds.",
+        "Toggle the Sound button in the top bar to mute or unmute effects.",
       ].forEach((text) => {
         const item = document.createElement("li");
         item.textContent = text;
@@ -515,6 +632,7 @@
 
   function resetPaddles() {
     player.speed = PLAYER_BASE_SPEED;
+    player.height = PADDLE_HEIGHT;
     player.y = HEIGHT / 2 - player.height / 2;
     ai.y = HEIGHT / 2 - ai.height / 2;
   }
@@ -557,6 +675,11 @@
       gameMode === "survival"
         ? "Survival: press Space to serve"
         : "Press Space to serve";
+    fieldPowerUp = null;
+    powerUpSpawnTimer = randomSpawnDelay();
+    effects.paddle = 0;
+    effects.slow = 0;
+    effects.immunity = 0;
   }
 
   function startGame(difficulty) {
@@ -621,6 +744,7 @@
     const paddleCenter = paddle.y + paddle.height / 2;
     const ballCenter = ball.y + ball.size / 2;
     const hitPosition = (ballCenter - paddleCenter) / (paddle.height / 2);
+    const slowFactor = effects.slow > 0 ? 0.75 : 1;
 
     if (gameMode === "survival" && paddle === player) {
       survivalReturns += 1;
@@ -629,17 +753,22 @@
       speedBonusPercent += 5;
       paddleBonusPercent += 2.5;
       player.speed = PLAYER_BASE_SPEED * (1 + paddleBonusPercent / 100);
-      ball.speed = getStartingBallSpeed();
+      ball.speed = getStartingBallSpeed() * slowFactor;
       help.textContent = `Survival | Best: ${survivalBest} | Ball: ${100 + speedBonusPercent}% | Paddle: ${formatPercent(100 + paddleBonusPercent)}`;
       updateScoreLabel();
     } else {
-      ball.speed = Math.min(ball.speed + 24, getStartingBallSpeed() + 330);
+      ball.speed = Math.min(ball.speed + 24, getStartingBallSpeed() * slowFactor + 330);
     }
 
     ball.vx = direction * ball.speed;
     ball.vy = hitPosition * 360;
     ball.x = direction > 0 ? paddle.x + paddle.width : paddle.x - ball.size;
     triggerImpact(0.12, 5);
+    if (paddle === player) {
+      sfx.paddleHit();
+    } else {
+      playTone({ freq: 165, duration: 0.09, type: "square", volume: 0.15 });
+    }
   }
 
   function pointScored(scoringSide) {
@@ -653,13 +782,16 @@
 
     updateScoreLabel();
     paused = true;
+    sfx.score();
 
     if (player.score >= WINNING_SCORE) {
       recordBotResult("player");
       roundMessage = "You win! Press Space to play again";
+      sfx.win();
     } else if (ai.score >= WINNING_SCORE) {
       recordBotResult("ai");
       roundMessage = "AI wins. Press Space to try again";
+      sfx.lose();
     } else {
       roundMessage = "Press Space to serve";
     }
@@ -670,6 +802,7 @@
     survivalGameOver = true;
     roundMessage = `Game over: ${survivalReturns} returns. Press Space to retry`;
     triggerImpact(0.3, 10);
+    sfx.lose();
   }
 
   function recordBotResult(winner) {
@@ -703,6 +836,108 @@
     shakeStrength = Math.max(shakeStrength, shake);
   }
 
+  function randomSpawnDelay() {
+    return POWERUP_MIN_SPAWN + Math.random() * (POWERUP_MAX_SPAWN - POWERUP_MIN_SPAWN);
+  }
+
+  function spawnPowerUp() {
+    const type = POWERUP_KEYS[Math.floor(Math.random() * POWERUP_KEYS.length)];
+    const margin = POWERUP_RADIUS + 30;
+    fieldPowerUp = {
+      type,
+      x: player.x + player.width / 2,
+      y: margin + Math.random() * (HEIGHT - margin * 2),
+      life: POWERUP_LIFETIME,
+      spawnedAt: performance.now(),
+    };
+    sfx.powerUpSpawn();
+  }
+
+  function updatePowerUpSpawning(deltaSeconds) {
+    if (fieldPowerUp) {
+      fieldPowerUp.life -= deltaSeconds;
+      if (fieldPowerUp.life <= 0) {
+        fieldPowerUp = null;
+        powerUpSpawnTimer = randomSpawnDelay();
+      }
+      return;
+    }
+
+    powerUpSpawnTimer -= deltaSeconds;
+    if (powerUpSpawnTimer <= 0) {
+      spawnPowerUp();
+    }
+  }
+
+  function circleRectCollision(circleX, circleY, radius, rect) {
+    const closestX = clamp(circleX, rect.x, rect.x + rect.width);
+    const closestY = clamp(circleY, rect.y, rect.y + rect.height);
+    const dx = circleX - closestX;
+    const dy = circleY - closestY;
+    return dx * dx + dy * dy <= radius * radius;
+  }
+
+  function checkPowerUpPickup() {
+    if (!fieldPowerUp) {
+      return;
+    }
+
+    if (circleRectCollision(fieldPowerUp.x, fieldPowerUp.y, POWERUP_RADIUS, player)) {
+      applyPowerUp(fieldPowerUp.type);
+      fieldPowerUp = null;
+      powerUpSpawnTimer = randomSpawnDelay();
+    }
+  }
+
+  function applyPowerUp(type) {
+    sfx.powerUpCollect(type);
+    triggerImpact(0.1, 3);
+
+    if (type === "paddle") {
+      if (effects.paddle <= 0) {
+        player.height = PADDLE_HEIGHT * 1.5;
+        player.y = clamp(player.y - (player.height - PADDLE_HEIGHT) / 2, 0, HEIGHT - player.height);
+      }
+      effects.paddle = EFFECT_DURATION;
+    } else if (type === "slow") {
+      if (effects.slow <= 0) {
+        ball.vx *= 0.75;
+        ball.vy *= 0.75;
+      }
+      effects.slow = EFFECT_DURATION;
+    } else if (type === "immunity") {
+      effects.immunity = EFFECT_DURATION;
+    }
+  }
+
+  function updateActiveEffects(deltaSeconds) {
+    if (effects.paddle > 0) {
+      effects.paddle -= deltaSeconds;
+      if (effects.paddle <= 0) {
+        effects.paddle = 0;
+        sfx.powerUpExpire();
+        player.height = PADDLE_HEIGHT;
+        player.y = clamp(player.y, 0, HEIGHT - player.height);
+      }
+    }
+
+    if (effects.slow > 0) {
+      effects.slow -= deltaSeconds;
+      if (effects.slow <= 0) {
+        effects.slow = 0;
+        sfx.powerUpExpire();
+      }
+    }
+
+    if (effects.immunity > 0) {
+      effects.immunity -= deltaSeconds;
+      if (effects.immunity <= 0) {
+        effects.immunity = 0;
+        sfx.powerUpExpire();
+      }
+    }
+  }
+
   function updatePlayer(deltaSeconds) {
     const up = keys.has("w") || keys.has("arrowup");
     const down = keys.has("s") || keys.has("arrowdown");
@@ -710,6 +945,7 @@
 
     player.y += movement * player.speed * deltaSeconds;
     player.y = clamp(player.y, 0, HEIGHT - player.height);
+    checkPowerUpPickup();
   }
 
   function updateAi(deltaSeconds) {
@@ -732,11 +968,13 @@
     if (ball.y <= 0) {
       ball.y = 0;
       ball.vy *= -1;
+      sfx.wallBounce();
     }
 
     if (ball.y + ball.size >= HEIGHT) {
       ball.y = HEIGHT - ball.size;
       ball.vy *= -1;
+      sfx.wallBounce();
     }
 
     if (rectangleCollision(ball, player) && ball.vx < 0) {
@@ -752,10 +990,16 @@
       ball.vx = -Math.abs(ball.vx);
       ball.vy += Math.sin(performance.now() / 90) * 35;
       triggerImpact(0.08, 3);
+      sfx.wallBounce();
     }
 
     if (ball.x + ball.size < 0) {
-      if (gameMode === "survival") {
+      if (effects.immunity > 0) {
+        ball.x = 0;
+        ball.vx = Math.abs(ball.vx);
+        triggerImpact(0.16, 6);
+        sfx.wallBounce();
+      } else if (gameMode === "survival") {
         endSurvivalRun();
       } else {
         pointScored("ai");
@@ -809,6 +1053,196 @@
     ctx.fillRect(ball.x, ball.y, ball.size, ball.size);
   }
 
+  function drawRoundedRect(x, y, width, height, radius) {
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.arcTo(x + width, y, x + width, y + height, radius);
+    ctx.arcTo(x + width, y + height, x, y + height, radius);
+    ctx.arcTo(x, y + height, x, y, radius);
+    ctx.arcTo(x, y, x + width, y, radius);
+    ctx.closePath();
+  }
+
+  function drawPowerIcon(type, radius, color) {
+    ctx.save();
+    ctx.fillStyle = color;
+    ctx.strokeStyle = color;
+
+    if (type === "paddle") {
+      const barWidth = radius * 0.28;
+      const barHeight = radius * 1.15;
+      drawRoundedRect(-barWidth / 2, -barHeight / 2, barWidth, barHeight, barWidth / 2);
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.moveTo(-radius * 0.28, -barHeight / 2 - radius * 0.16);
+      ctx.lineTo(0, -barHeight / 2 - radius * 0.42);
+      ctx.lineTo(radius * 0.28, -barHeight / 2 - radius * 0.16);
+      ctx.lineWidth = radius * 0.16;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(-radius * 0.28, barHeight / 2 + radius * 0.16);
+      ctx.lineTo(0, barHeight / 2 + radius * 0.42);
+      ctx.lineTo(radius * 0.28, barHeight / 2 + radius * 0.16);
+      ctx.stroke();
+    } else if (type === "slow") {
+      const rx = radius * 0.58;
+      const ry = radius * 0.4;
+
+      ctx.beginPath();
+      ctx.ellipse(-radius * 0.02, radius * 0.05, rx, ry, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(radius * 0.5, -radius * 0.02, radius * 0.2, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = "rgba(16, 19, 25, 0.85)";
+      [-0.32, 0, 0.32].forEach((offset) => {
+        ctx.beginPath();
+        ctx.ellipse(offset * radius, radius * 0.36, radius * 0.1, radius * 0.07, 0, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      ctx.beginPath();
+      ctx.arc(radius * 0.5, -radius * 0.02, radius * 0.05, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (type === "immunity") {
+      ctx.beginPath();
+      ctx.moveTo(0, -radius * 0.85);
+      ctx.lineTo(radius * 0.7, -radius * 0.5);
+      ctx.bezierCurveTo(radius * 0.7, radius * 0.15, radius * 0.4, radius * 0.65, 0, radius * 0.9);
+      ctx.bezierCurveTo(-radius * 0.4, radius * 0.65, -radius * 0.7, radius * 0.15, -radius * 0.7, -radius * 0.5);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.strokeStyle = "rgba(16, 19, 25, 0.85)";
+      ctx.lineWidth = radius * 0.14;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      ctx.moveTo(-radius * 0.32, 0);
+      ctx.lineTo(-radius * 0.06, radius * 0.28);
+      ctx.lineTo(radius * 0.4, -radius * 0.28);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
+  function drawPlayerPaddle() {
+    if (effects.immunity > 0) {
+      const glowPulse = 0.5 + Math.sin(performance.now() / 110) * 0.25;
+      ctx.save();
+      ctx.shadowColor = POWERUP_TYPES.immunity.color;
+      ctx.shadowBlur = 18 * glowPulse + 6;
+      ctx.fillStyle = "#63d2ff";
+      ctx.fillRect(player.x, player.y, player.width, player.height);
+      ctx.restore();
+      ctx.strokeStyle = POWERUP_TYPES.immunity.color;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(player.x - 2, player.y - 2, player.width + 4, player.height + 4);
+      return;
+    }
+
+    if (effects.paddle > 0) {
+      ctx.save();
+      ctx.shadowColor = POWERUP_TYPES.paddle.color;
+      ctx.shadowBlur = 12;
+      ctx.fillStyle = "#63d2ff";
+      ctx.fillRect(player.x, player.y, player.width, player.height);
+      ctx.restore();
+      return;
+    }
+
+    drawRect(player, "#63d2ff");
+  }
+
+  function drawPowerUp() {
+    if (!fieldPowerUp) {
+      return;
+    }
+
+    const def = POWERUP_TYPES[fieldPowerUp.type];
+    const pulse = 1 + Math.sin(performance.now() / 160) * 0.08;
+    const radius = POWERUP_RADIUS * pulse;
+    const lifeRatio = clamp(fieldPowerUp.life / POWERUP_LIFETIME, 0, 1);
+
+    ctx.save();
+    ctx.translate(fieldPowerUp.x, fieldPowerUp.y);
+
+    const gradient = ctx.createRadialGradient(0, 0, radius * 0.2, 0, 0, radius * 1.7);
+    gradient.addColorStop(0, def.glow);
+    gradient.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.arc(0, 0, radius * 1.7, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "rgba(16, 19, 25, 0.88)";
+    ctx.beginPath();
+    ctx.arc(0, 0, radius, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = def.color;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(0, 0, radius + 5, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * lifeRatio);
+    ctx.strokeStyle = def.color;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    drawPowerIcon(fieldPowerUp.type, radius * 0.72, "#ffffff");
+
+    ctx.restore();
+  }
+
+  function drawEffectHud() {
+    const active = POWERUP_KEYS.filter((key) => effects[key] > 0);
+    if (!active.length) {
+      return;
+    }
+
+    const size = 36;
+    const gap = 10;
+    const y = 16;
+    let x = 16;
+
+    active.forEach((key) => {
+      const def = POWERUP_TYPES[key];
+      const ratio = clamp(effects[key] / EFFECT_DURATION, 0, 1);
+
+      ctx.save();
+      ctx.translate(x + size / 2, y + size / 2);
+
+      ctx.fillStyle = "rgba(16, 19, 25, 0.8)";
+      ctx.beginPath();
+      ctx.arc(0, 0, size / 2, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.16)";
+      ctx.beginPath();
+      ctx.arc(0, 0, size / 2 - 1.5, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.strokeStyle = def.color;
+      ctx.beginPath();
+      ctx.arc(0, 0, size / 2 - 1.5, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * ratio);
+      ctx.stroke();
+
+      drawPowerIcon(key, size * 0.32, "#ffffff");
+
+      ctx.restore();
+      x += size + gap;
+    });
+  }
+
   function drawMessage() {
     if (!roundMessage) {
       return;
@@ -833,11 +1267,13 @@
     }
 
     drawCourt();
-    drawRect(player, "#63d2ff");
+    drawPowerUp();
+    drawPlayerPaddle();
     if (gameMode === "bot") {
       drawRect(ai, "#ffcc66");
     }
     drawBall();
+    drawEffectHud();
     drawMessage();
     ctx.restore();
   }
@@ -864,6 +1300,8 @@
           updateAi(deltaSeconds);
         }
         updateBall(deltaSeconds);
+        updatePowerUpSpawning(deltaSeconds);
+        updateActiveEffects(deltaSeconds);
       }
     }
 
@@ -896,6 +1334,13 @@
   });
 
   restartButton.addEventListener("click", returnToMenu);
+  soundButton.addEventListener("click", () => {
+    soundEnabled = !soundEnabled;
+    soundButton.textContent = soundEnabled ? "\uD83D\uDD0A Sound: On" : "\uD83D\uDD07 Sound: Off";
+    if (soundEnabled) {
+      ensureAudio();
+    }
+  });
 
   resetBall();
   renderMenu();
