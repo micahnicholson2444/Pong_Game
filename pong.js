@@ -5,6 +5,7 @@
   const PADDLE_HEIGHT = 96;
   const BALL_SIZE = 14;
   const WINNING_SCORE = 7;
+  const SURVIVAL_BASE_SPEED = 430;
 
   const DIFFICULTIES = {
     Easy: {
@@ -255,12 +256,21 @@
   const ctx = canvas.getContext("2d");
   const keys = new Set();
   let screen = "main";
+  let gameMode = "bot";
   let selectedDifficulty = DIFFICULTIES.Medium;
   let ballSpeedPercent = 100;
   let lastTime = performance.now();
   let roundMessage = "Press Space to serve";
   let paused = true;
   let gameActive = false;
+  let survivalReturns = 0;
+  let survivalBest = Number(localStorage.getItem("pongSurvivalBest") || 0);
+  let survivalGameOver = false;
+  let speedBonusPercent = 0;
+  let impactFlash = 0;
+  let shakeTime = 0;
+  let shakeStrength = 0;
+  const ballTrail = [];
 
   const player = {
     x: 36,
@@ -329,6 +339,7 @@
         title("PLAY"),
         subtitle("Choose your match type."),
         makeButton("Play Against Bot", () => setScreen("speed"), "primary"),
+        makeButton("Survival Mode", startSurvivalGame),
         makeButton("Back", () => setScreen("main"))
       );
     }
@@ -357,7 +368,14 @@
     if (screen === "info") {
       const instructions = document.createElement("ul");
       instructions.className = "pong-info";
-      ["Use W/S or the arrow keys to move your paddle.", "Press Space to serve the ball.", "First player to 7 points wins.", "Hit the ball near the paddle edges to change its angle."].forEach((text) => {
+      [
+        "Use W/S or the arrow keys to move your paddle.",
+        "Press Space to serve the ball.",
+        "Bot mode: first player to 7 points wins.",
+        "Survival mode: return the ball for as long as possible against the wall.",
+        "In survival, every successful return makes the ball 1% faster.",
+        "Hit the ball near the paddle edges to change its angle.",
+      ].forEach((text) => {
         const item = document.createElement("li");
         item.textContent = text;
         instructions.appendChild(item);
@@ -437,29 +455,59 @@
     ball.speed = getStartingBallSpeed();
     ball.vx = direction * ball.speed;
     ball.vy = (Math.random() * 240 - 120) || 100;
+    ballTrail.length = 0;
   }
 
   function getStartingBallSpeed() {
+    if (gameMode === "survival") {
+      return SURVIVAL_BASE_SPEED * (1 + speedBonusPercent / 100);
+    }
+
     return selectedDifficulty.ballSpeed * (ballSpeedPercent / 100);
   }
 
   function restartGame() {
     player.score = 0;
     ai.score = 0;
-    score.textContent = "0 : 0";
-    help.textContent = `Difficulty: ${selectedDifficulty.name} | Speed: ${ballSpeedPercent}%`;
+    survivalReturns = 0;
+    survivalGameOver = false;
+    speedBonusPercent = 0;
+    updateScoreLabel();
+    help.textContent =
+      gameMode === "survival"
+        ? `Survival | Best: ${survivalBest} | Speed: 100%`
+        : `Difficulty: ${selectedDifficulty.name} | Speed: ${ballSpeedPercent}%`;
     ai.speed = selectedDifficulty.aiSpeed;
     resetPaddles();
-    resetBall();
+    resetBall(gameMode === "survival" ? -1 : undefined);
     paused = true;
     gameActive = true;
-    roundMessage = "Press Space to serve";
+    roundMessage =
+      gameMode === "survival"
+        ? "Survival: press Space to serve"
+        : "Press Space to serve";
   }
 
   function startGame(difficulty) {
+    gameMode = "bot";
     selectedDifficulty = difficulty;
     setScreen("game");
     restartGame();
+  }
+
+  function startSurvivalGame() {
+    gameMode = "survival";
+    setScreen("game");
+    restartGame();
+  }
+
+  function updateScoreLabel() {
+    if (gameMode === "survival") {
+      score.textContent = `Returns: ${survivalReturns}`;
+      return;
+    }
+
+    score.textContent = `${player.score} : ${ai.score}`;
   }
 
   function returnToMenu() {
@@ -472,6 +520,11 @@
 
   function startRound() {
     if (!gameActive || screen !== "game") {
+      return;
+    }
+
+    if (gameMode === "survival" && survivalGameOver) {
+      restartGame();
       return;
     }
 
@@ -498,10 +551,22 @@
     const ballCenter = ball.y + ball.size / 2;
     const hitPosition = (ballCenter - paddleCenter) / (paddle.height / 2);
 
-    ball.speed = Math.min(ball.speed + 24, getStartingBallSpeed() + 330);
+    if (gameMode === "survival" && paddle === player) {
+      survivalReturns += 1;
+      survivalBest = Math.max(survivalBest, survivalReturns);
+      localStorage.setItem("pongSurvivalBest", String(survivalBest));
+      speedBonusPercent += 1;
+      ball.speed = getStartingBallSpeed();
+      help.textContent = `Survival | Best: ${survivalBest} | Speed: ${100 + speedBonusPercent}%`;
+      updateScoreLabel();
+    } else {
+      ball.speed = Math.min(ball.speed + 24, getStartingBallSpeed() + 330);
+    }
+
     ball.vx = direction * ball.speed;
     ball.vy = hitPosition * 360;
     ball.x = direction > 0 ? paddle.x + paddle.width : paddle.x - ball.size;
+    triggerImpact(0.12, 5);
   }
 
   function pointScored(scoringSide) {
@@ -513,7 +578,7 @@
       resetBall(-1);
     }
 
-    score.textContent = `${player.score} : ${ai.score}`;
+    updateScoreLabel();
     paused = true;
 
     if (player.score >= WINNING_SCORE) {
@@ -523,6 +588,19 @@
     } else {
       roundMessage = "Press Space to serve";
     }
+  }
+
+  function endSurvivalRun() {
+    paused = true;
+    survivalGameOver = true;
+    roundMessage = `Game over: ${survivalReturns} returns. Press Space to retry`;
+    triggerImpact(0.3, 10);
+  }
+
+  function triggerImpact(flash, shake) {
+    impactFlash = Math.max(impactFlash, flash);
+    shakeTime = Math.max(shakeTime, 0.16);
+    shakeStrength = Math.max(shakeStrength, shake);
   }
 
   function updatePlayer(deltaSeconds) {
@@ -565,13 +643,24 @@
       bounceOffPaddle(player, 1);
     }
 
-    if (rectangleCollision(ball, ai) && ball.vx > 0) {
+    if (gameMode === "bot" && rectangleCollision(ball, ai) && ball.vx > 0) {
       bounceOffPaddle(ai, -1);
     }
 
+    if (gameMode === "survival" && ball.x + ball.size >= WIDTH) {
+      ball.x = WIDTH - ball.size;
+      ball.vx = -Math.abs(ball.vx);
+      ball.vy += Math.sin(performance.now() / 90) * 35;
+      triggerImpact(0.08, 3);
+    }
+
     if (ball.x + ball.size < 0) {
-      pointScored("ai");
-    } else if (ball.x > WIDTH) {
+      if (gameMode === "survival") {
+        endSurvivalRun();
+      } else {
+        pointScored("ai");
+      }
+    } else if (gameMode === "bot" && ball.x > WIDTH) {
       pointScored("player");
     }
   }
@@ -579,6 +668,11 @@
   function drawCourt() {
     ctx.fillStyle = "#171b22";
     ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+    if (impactFlash > 0) {
+      ctx.fillStyle = `rgba(121, 216, 255, ${impactFlash})`;
+      ctx.fillRect(0, 0, WIDTH, HEIGHT);
+    }
 
     ctx.strokeStyle = "#303746";
     ctx.lineWidth = 4;
@@ -588,6 +682,15 @@
     ctx.lineTo(WIDTH / 2, HEIGHT - 18);
     ctx.stroke();
     ctx.setLineDash([]);
+
+    if (gameMode === "survival") {
+      ctx.strokeStyle = "#ffcc66";
+      ctx.lineWidth = 8;
+      ctx.beginPath();
+      ctx.moveTo(WIDTH - 8, 0);
+      ctx.lineTo(WIDTH - 8, HEIGHT);
+      ctx.stroke();
+    }
   }
 
   function drawRect(rect, color) {
@@ -596,6 +699,12 @@
   }
 
   function drawBall() {
+    ballTrail.forEach((point, index) => {
+      const alpha = ((index + 1) / ballTrail.length) * 0.22;
+      ctx.fillStyle = `rgba(248, 244, 219, ${alpha})`;
+      ctx.fillRect(point.x, point.y, ball.size, ball.size);
+    });
+
     ctx.fillStyle = "#f8f4db";
     ctx.fillRect(ball.x, ball.y, ball.size, ball.size);
   }
@@ -616,22 +725,44 @@
   }
 
   function draw() {
+    ctx.save();
+    if (shakeTime > 0) {
+      const shakeX = (Math.random() - 0.5) * shakeStrength;
+      const shakeY = (Math.random() - 0.5) * shakeStrength;
+      ctx.translate(shakeX, shakeY);
+    }
+
     drawCourt();
     drawRect(player, "#63d2ff");
-    drawRect(ai, "#ffcc66");
+    if (gameMode === "bot") {
+      drawRect(ai, "#ffcc66");
+    }
     drawBall();
     drawMessage();
+    ctx.restore();
   }
 
   function gameLoop(now) {
     const deltaSeconds = Math.min((now - lastTime) / 1000, 0.033);
     lastTime = now;
+    impactFlash = Math.max(0, impactFlash - deltaSeconds * 1.8);
+    shakeTime = Math.max(0, shakeTime - deltaSeconds);
+    if (shakeTime === 0) {
+      shakeStrength = 0;
+    }
 
     if (gameActive) {
       updatePlayer(deltaSeconds);
 
       if (!paused) {
-        updateAi(deltaSeconds);
+        ballTrail.push({ x: ball.x, y: ball.y });
+        if (ballTrail.length > 12) {
+          ballTrail.shift();
+        }
+
+        if (gameMode === "bot") {
+          updateAi(deltaSeconds);
+        }
         updateBall(deltaSeconds);
       }
     }
